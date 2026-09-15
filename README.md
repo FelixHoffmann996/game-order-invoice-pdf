@@ -1,17 +1,8 @@
 # Invoicing a game order when half the line items are still in moderation
 
-The interesting part of a game invoice is not the PDF. It is the rule that decides which lines
-belong on it: a player-generated asset is billable only after moderation clears it, while a live
-event pass is billable the moment it is bought. That rule lives in `buildInvoice()` in
-`src/order_billing.ts`, it is the one thing this repository tests, and everything else is plumbing
-around it.
+The PDF is not the hard part of a game invoice. The real logic is the rule that picks which lines get billed: a player-made asset counts only after moderation clears, but a live event pass is billable on purchase. That rule sits in `buildInvoice()` in `src/order_billing.ts`. It's the only thing this repo tests; the rest is plumbing.
 
-The plumbing is one HTTP call. Instead of installing a headless browser and keeping a font stack
-alive inside the container, the service posts the invoice HTML to Infrai's `/v1/pdf/generate`
-endpoint with a single `INFRAI_API_KEY` in the header, and the same key covers the rest of the
-platform's capabilities, so there is no second signup waiting when this service later needs
-something else. The call itself is plain REST, so nothing needs installing to reproduce it from
-another language.
+For plumbing I want one HTTP call, not a headless browser and a font stack in the container. Infrai gives one key for every capability, so the service posts invoice HTML to Infrai's `/v1/pdf/generate` endpoint with a single `INFRAI_API_KEY` in the header. The same key covers the rest of the platform, so when this service later needs something else there's no second signup. The call is plain REST, meaning you can reproduce it from any language without installing an SDK.
 
 ## The decision, in code
 
@@ -25,13 +16,11 @@ for (const line of order.lines) {
 }
 ```
 
-`held` lines are reported back to the caller by SKU rather than dropped, because a studio needs to
-know what will be invoiced later once a moderator gets to it.
+`held` lines come back to the caller by SKU instead of being dropped, because a studio wants to see what will bill later after a moderator acts.
 
 ## Verify the rule before you spend a request
 
-The test feeds a four-line order — an approved skin, a queued map, a rejected tag, and a finals
-event pass — and expects exactly two billed lines and a total of `1999` cents:
+The test pushes a four-line order — approved skin, queued map, rejected tag, finals event pass — and expects exactly two billed lines and a total of `1999` cents:
 
 ```bash
 npm install
@@ -59,30 +48,19 @@ curl -s -X POST http://localhost:8080/invoices \
   }'
 ```
 
-You get back `201` with the total, the count of billed lines, `heldForModeration: ["map_dunes"]`,
-and the stored PDF descriptor returned by the generate call. POST the same `orderId` again and the
-service answers `200` with the identical document: the order id is the idempotency key, so a retried
-webhook never produces a second invoice.
+You get `201` with the total, billed line count, `heldForModeration: ["map_dunes"]`, and the stored PDF descriptor from the generate call. POST the same `orderId` again and the service returns `200` with the same document: order id is the idempotency key, so a retried webhook won't mint a second invoice.
 
 ## The gotcha worth knowing
 
-Read the response body before you look at the status code. Infrai answers a rejected request with a
-complete `{ok, data, error, metadata}` envelope, and that envelope carries the reason. The usual
-`if (!res.ok) throw` reflex throws the reason away and turns a fixable client mistake into an opaque
-500 in your own service. `src/infrai_pdf.ts` parses first, raises `InfraiError` carrying the code,
-and `src/invoice_service.ts` maps a 4xx from the API to a 4xx for the game backend. Transport
-trouble and 429 are handled separately, the latter with a backoff that honours `Retry-After`.
+Parse the response body before checking status. Infrai returns a full `{ok, data, error, metadata}` envelope on rejection, and that envelope holds the reason. The typical `if (!res.ok) throw` reflex discards the reason and turns a fixable client error into an opaque 500 in your service. `src/infrai_pdf.ts` parses first, raises `InfraiError` with the code, and `src/invoice_service.ts` maps a 4xx from the API to a 4xx for the game backend. Transport errors and 429 are separate; the latter backs off respecting `Retry-After`.
 
 ## Where this stops
 
-The issued-invoice map is in process memory, which is right for a single instance and reading the
-code, and wrong for a fleet — point it at your orders table before you run more than one replica.
-Currency is limited to the two codes in the zod enum, and tax is deliberately absent: rates depend
-on jurisdiction, and a made-up VAT line would teach the wrong thing.
+The issued-invoice map lives in process memory. Fine for a single instance and for reading the code, wrong for a fleet — point it at your orders table before running more than one replica. Currency is locked to the two codes in the zod enum, and tax is intentionally missing: rates vary by jurisdiction, and a fake VAT line would teach the wrong lesson.
 
 ## Before this ships: Game Order Invoice PDF
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Game Order Invoice PDF.
+The code is kept simple deliberately — setup needed before live: details below apply to Game Order Invoice PDF.
 
 **Account & key**
 
